@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agrinas WebGIS (Leaflet + Turf)</title>
+
+  <!-- Leaflet & Draw CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
+
+  <style>
+    /* ============== THEME ============== */
+    :root{
+      --brand:#2E7D32;            /* deep green like agrinas palette */
+      --brand-2:#1B5E20;
+      --bg:#f6f7f9;
+      --panel:#ffffff;
+      --border:#e5e7eb;
+      --text:#111827;
+      --muted:#6b7280;
+      --accent:#f59e0b;
+    }
+
+    /* ============== LAYOUT ============== */
+    *{box-sizing:border-box}
+    html,body{height:100%;margin:0;font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;background:var(--bg);color:var(--text)}
+    .app{display:grid;grid-template-rows:56px 1fr; height:100%}
+
+    /* Top bar */
+    .topbar{
+      display:flex;align-items:center;gap:12px;padding:0 16px;
+      background:linear-gradient(90deg,var(--brand),var(--brand-2));color:#fff;
+      border-bottom:1px solid rgba(255,255,255,.15)
+    }
+    .brand{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:.3px}
+    .brand .logo-img {height: 36px;width: auto;border-radius: 6px}
+    .top-actions{margin-left:auto;display:flex;gap:8px}
+    .btn-top{background:rgba(255,255,255,.12);color:#fff;border:1px solid rgba(255,255,255,.2);padding:6px 10px;border-radius:8px;font-size:13px;cursor:pointer}
+    .btn-top:hover{background:rgba(255,255,255,.2)}
+
+    /* Main area */
+    .main{display:grid;grid-template-columns:320px 1fr; gap:0; height:100%}
+    @media (max-width: 900px){
+      .main{grid-template-columns:1fr}
+      .sidebar{height:320px}
+      .map-wrap{height:calc(100vh - 56px - 320px)}
+    }
+    .sidebar{
+      background:var(--panel);border-right:1px solid var(--border);
+      padding:14px;overflow:auto
+    }
+    .panel-title{
+      font-size:12px;font-weight:800;color:var(--muted);
+      text-transform:uppercase;letter-spacing:.12em;margin:6px 0 8px
+    }
+    .card{border:1px solid var(--border);background:#fff;border-radius:12px;padding:12px;margin-bottom:12px}
+    .row{display:flex;gap:8px;flex-wrap:wrap}
+    .btn{appearance:none;border:1px solid var(--border);background:#fff;border-radius:10px;padding:8px 10px;cursor:pointer;font-size:13px}
+    .btn.primary{background:var(--brand);color:#fff;border-color:var(--brand)}
+    .btn.warn{background:var(--accent);color:#111;border-color:var(--accent)}
+    .btn.ghost{background:#f3f4f6}
+    .btn:disabled{opacity:.6;cursor:not-allowed}
+    .field{display:flex;flex-direction:column;gap:6px;margin-bottom:8px}
+    .field label{font-size:12px;color:var(--muted)}
+    .select{border:1px solid var(--border);border-radius:10px;padding:8px;background:#fff}
+    .divider{height:1px;background:var(--border);margin:10px 0}
+
+    /* Attribute table */
+    .table-wrap{max-height:260px;overflow:auto;border:1px solid var(--border);border-radius:10px}
+    table{border-collapse:collapse;width:100%;font-size:12px}
+    thead th{position:sticky;top:0;background:#f8fafc;border-bottom:1px solid var(--border);text-align:left;padding:8px}
+    tbody td{border-bottom:1px solid var(--border);padding:6px 8px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
+
+    /* Map */
+    #map{height:100%;width:100%}
+    .map-wrap{position:relative}
+    .map-badges{position:absolute;bottom:12px;left:12px;display:flex;gap:8px;z-index:500}
+    .badge{background:#fff;border:1px solid var(--border);border-radius:999px;padding:6px 10px;font-size:12px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+    .legend{position:absolute;top:12px;right:12px;z-index:500;background:#fff;border:1px solid var(--border);border-radius:10px;padding:8px 10px;font-size:12px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <!-- =================== TOP BAR =================== -->
+    <header class="topbar">
+      <div class="brand">
+        <img src="LOGO.png" class="logo-img" alt="Logo" />
+        Agrinas WebGIS
+      </div>
+      <div class="top-actions">
+        <button class="btn-top" id="btn-export-selected">Export Selected</button>
+        <button class="btn-top" id="btn-export-merged">Export Merged</button>
+      </div>
+    </header>
+
+    <!-- =================== MAIN =================== -->
+    <section class="main">
+      <!-- ========== SIDEBAR ========== -->
+      <aside class="sidebar">
+        <div class="panel-title">Data</div>
+        <div class="card">
+          <div class="field">
+            <label>Load GeoJSON</label>
+            <input type="file" id="file-input" accept=".geojson,.json" />
+          </div>
+
+          <div class="row">
+            <button class="btn" id="btn-select-all">Select All</button>
+            <button class="btn ghost" id="btn-clear">Clear Selection</button>
+            <button class="btn" id="btn-zoom-selected">Zoom to Selected</button>
+          </div>
+
+          <div class="row" style="margin-top:6px">
+            <button class="btn primary" id="btn-merge">Merge Selected (Union)</button>
+            <button class="btn warn" id="btn-reset-merged">Reset Merged Layer</button>
+          </div>
+        </div>
+
+        <div class="panel-title">Attribute Table (Selected)</div>
+        <div class="card">
+          <div class="field">
+            <label>Filter</label>
+            <input type="text" id="filter-input" placeholder="Type to filter rows..." class="select" />
+          </div>
+          <div class="table-wrap">
+            <table id="attr-table">
+              <thead><tr><th>#</th><th>id</th><th>name</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel-title">Draw</div>
+        <div class="card">
+          <p style="margin:0 0 8px;color:var(--muted);font-size:12px">
+            Use the rectangle tool on the map toolbar to box-select features.
+          </p>
+          <div class="row">
+            <button class="btn" id="btn-help">Help</button>
+          </div>
+        </div>
+      </aside>
+
+      <!-- ========== MAP AREA ========== -->
+      <div class="map-wrap">
+        <div id="map"></div>
+        <div class="legend">
+          Click polygons to toggle selection. <b>Orange</b> = selected. <b>Green</b> = merged result.<br>
+          Use the top-right control to switch basemaps (Streets / Satellite / Gray).
+        </div>
+        <div class="map-badges">
+          <div class="badge" id="badge-count">Selected: 0</div>
+          <div class="badge" id="badge-merged">Merged: 0 features</div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ============== DEPENDENCIES ============== -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
+
+  <script>
+    // ============================================================
+    // MAP & LAYERS
+    // ============================================================
+    const map = L.map('map', { preferCanvas: true }).setView([-6.2, 106.8167], 10);
+
+    // --- Base layers (with Satellite) ---
+    const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution:'© OpenStreetMap'
+    });
+
+    const esriWorldImagery = L.tileLayer(
+      'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      { attribution: 'Tiles © Esri — Sources: Esri, USGS, NOAA' }
+    );
+
+    const cartoLight = L.tileLayer(
+      'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+      { attribution: '© OpenStreetMap, © CARTO' }
+    );
+
+    // Add a default basemap on load
+    osm.addTo(map);
+
+    // Basemap switcher control
+    L.control.layers(
+      {
+        'Streets (OSM)': osm,
+        'Satellite (Esri World Imagery)': esriWorldImagery,
+        'Gray (Carto Light)': cartoLight
+      },
+      null,
+      { position: 'topright', collapsed: true }
+    ).addTo(map);
+
+    // --- Feature layers ---
+    const dataLayer   = L.geoJSON(null, { style: baseStyle, onEachFeature, pointToLayer: ptToCircle }).addTo(map);
+    const mergedLayer = L.geoJSON(null, { style: mergedStyle }).addTo(map);
+
+    function baseStyle()     { return { color:'#2563eb', weight:2,  fillOpacity:.15 }; }
+    function selectedStyle() { return { color:'#f59e0b', weight:3,  fillOpacity:.25 }; }
+    function mergedStyle()   { return { color:'#2E7D32', weight:2,  fillOpacity:.25 }; }
+    function ptToCircle(f, latlng){ return L.circleMarker(latlng, { radius:6, color:'#2563eb', fillOpacity:.9 }); }
+
+    // ============================================================
+    // SELECTION / STATE
+    // ============================================================
+    const selected = new Map(); // leaflet_id -> { feature, layer }
+
+    function onEachFeature(feature, layer){
+      // Toggle selection on click
+      layer.on('click', () => toggleSelect(layer));
+
+      // Optional popup preview
+      if(feature.properties){
+        const html = Object.entries(feature.properties).slice(0,8)
+                     .map(([k,v])=>`<b>${escapeHtml(k)}</b>: ${escapeHtml(v)}`).join('<br>');
+        layer.bindPopup(html);
+      }
+    }
+
+    function toggleSelect(layer){
+      const id = layer._leaflet_id;
+      if(selected.has(id)){
+        // deselect
+        selected.delete(id);
+        dataLayer.resetStyle(layer);
+      } else {
+        // select
+        selected.set(id, { feature: layer.feature, layer });
+        try{ layer.setStyle(selectedStyle()); }catch{}
+      }
+      updateBadges();
+      rebuildTable();
+    }
+
+    function selectLayer(layer){
+      const id = layer._leaflet_id;
+      if(!selected.has(id)){
+        selected.set(id, { feature: layer.feature, layer });
+        try{ layer.setStyle(selectedStyle()); }catch{}
+      }
+    }
+
+    // ============================================================
+    // LOAD DATA (GeoJSON)
+    // ============================================================
+    document.getElementById('file-input').addEventListener('change', (e)=>{
+      const f = e.target.files[0]; if(!f) return;
+      const reader = new FileReader();
+      reader.onload = ev => {
+        try{
+          const gj = JSON.parse(ev.target.result);
+          loadGeoJSON(gj);
+        }catch(err){ alert('Invalid GeoJSON'); console.error(err); }
+      };
+      reader.readAsText(f);
+      e.target.value = null;
+    });
+
+    function loadGeoJSON(gj){
+      dataLayer.clearLayers();
+      mergedLayer.clearLayers();
+      selected.clear();
+      dataLayer.addData(gj);
+
+      try{ map.fitBounds(dataLayer.getBounds(), { maxZoom: 15 }); }catch{}
+      updateBadges(); rebuildTable(); updateMergedBadge();
+    }
+
+    // ============================================================
+    // DRAW RECTANGLE -> BOX SELECT
+    // ============================================================
+    const drawn = new L.FeatureGroup().addTo(map);
+    const drawCtl = new L.Control.Draw({
+      draw:{ rectangle:{ shapeOptions:{ color:'#f59e0b' }}, polygon:false, polyline:false, circle:false, marker:false, circlemarker:false },
+      edit:{ featureGroup: drawn, edit:false, remove:false }
+    });
+    map.addControl(drawCtl);
+
+    map.on(L.Draw.Event.CREATED, e => {
+      const rect = e.layer; drawn.addLayer(rect);
+      const b = rect.getBounds();
+
+      dataLayer.eachLayer(l => {
+        if(l.getLatLng){ if(b.contains(l.getLatLng())) selectLayer(l); }
+        else if(l.getBounds){ if(b.intersects(l.getBounds())) selectLayer(l); }
+      });
+
+      setTimeout(()=>drawn.removeLayer(rect), 300);
+      updateBadges(); rebuildTable();
+    });
+
+    // ============================================================
+    // BUTTONS
+    // ============================================================
+    document.getElementById('btn-select-all').onclick = () => {
+      dataLayer.eachLayer(selectLayer);
+      updateBadges(); rebuildTable();
+    };
+
+    document.getElementById('btn-clear').onclick = () => {
+      selected.forEach(v => { try{ dataLayer.resetStyle(v.layer); }catch{} });
+      selected.clear();
+      updateBadges(); rebuildTable();
+    };
+
+    document.getElementById('btn-zoom-selected').onclick = () => {
+      const group = L.featureGroup(Array.from(selected.values()).map(v=>v.layer));
+      try{ map.fitBounds(group.getBounds(),{ maxZoom:15 }); }catch{}
+    };
+
+    document.getElementById('btn-merge').onclick = () => {
+      // Merge only polygonal features (Polygon/MultiPolygon)
+      const feats = Array.from(selected.values())
+        .map(v=>v.feature)
+        .filter(f=>/Polygon|MultiPolygon/.test(f.geometry.type));
+
+      if(feats.length < 2){ alert('Select at least two polygons to merge'); return; }
+
+      try{
+        let merged = feats.reduce((acc, f)=> acc ? turf.union(acc, f) : f, null);
+
+        // Normalize to a single Feature result
+        if(merged.type === 'FeatureCollection') merged = merged.features[0];
+
+        mergedLayer.clearLayers();
+        merged.properties = merged.properties || {};
+        merged.properties.merged_count = feats.length;
+        mergedLayer.addData(merged);
+        updateMergedBadge(1);
+
+        try{ map.fitBounds(mergedLayer.getBounds(), { maxZoom: 14 }); }catch{}
+      } catch(err){
+        console.error(err);
+        alert('Merge failed. Ensure geometries are valid and overlapping/touching.');
+      }
+    };
+
+    document.getElementById('btn-reset-merged').onclick = () => {
+      mergedLayer.clearLayers();
+      updateMergedBadge(0);
+    };
+
+    // Export buttons (topbar)
+    document.getElementById('btn-export-selected').onclick = () => {
+      if(selected.size===0) return alert('No features selected');
+      const fc = { type:'FeatureCollection', features: Array.from(selected.values()).map(v=>v.feature) };
+      downloadJSON(fc, 'selected.geojson');
+    };
+
+    document.getElementById('btn-export-merged').onclick = () => {
+      if(!mergedLayer.getLayers().length) return alert('No merged geometry');
+      const gj = mergedLayer.toGeoJSON();
+      downloadJSON(gj, 'merged.geojson');
+    };
+
+    // ============================================================
+    // ATTRIBUTE TABLE
+    // ============================================================
+    const table = document.getElementById('attr-table');
+    const tbody = table.querySelector('tbody');
+
+    function rebuildTable(){
+      // Determine union of property keys from selected features
+      const keys = new Set(['id','name']);
+      selected.forEach(({feature}) => {
+        if(feature.properties) Object.keys(feature.properties).forEach(k => keys.add(k));
+      });
+
+      // Header
+      const headHtml = ['<tr><th>#</th>', ...Array.from(keys).map(k=>`<th>${escapeHtml(k)}</th>`), '</tr>'].join('');
+      table.querySelector('thead').innerHTML = headHtml;
+
+      // Body
+      tbody.innerHTML = '';
+      let i = 1;
+      selected.forEach(({feature}) => {
+        const props = feature.properties || {};
+        const cells = ['<td>'+i+'</td>'];
+        Array.from(keys).forEach(k=>{
+          const v = props[k] !== undefined ? String(props[k]) : '';
+          cells.push(`<td>${escapeHtml(v)}</td>`);
+        });
+        tbody.insertAdjacentHTML('beforeend', `<tr>${cells.join('')}</tr>`);
+        i++;
+      });
+
+      applyFilter();
+    }
+
+    // Simple table filter
+    document.getElementById('filter-input').addEventListener('input', applyFilter);
+    function applyFilter(){
+      const q = document.getElementById('filter-input').value.trim().toLowerCase();
+      Array.from(tbody.rows).forEach(r => {
+        r.style.display = r.textContent.toLowerCase().includes(q) ? '' : 'none';
+      });
+    }
+
+    // ============================================================
+    // UTILITIES
+    // ============================================================
+    function updateBadges(){
+      document.getElementById('badge-count').textContent = `Selected: ${selected.size}`;
+    }
+
+    function updateMergedBadge(n){
+      const count = n!==undefined ? n : (mergedLayer.getLayers().length ? 1 : 0);
+      document.getElementById('badge-merged').textContent = `Merged: ${count} feature${count===1?'':'s'}`;
+    }
+
+    function downloadJSON(obj, name){
+      const blob = new Blob([JSON.stringify(obj)], { type:'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = name; a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    function escapeHtml(s){
+      return String(s).replace(/[&<>\"']/g, c => ({
+        "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
+      }[c]));
+    }
+
+    // ============================================================
+    // OPTIONAL: preload a tiny sample so UI isn't empty (you can remove)
+    // ============================================================
+    const sample = {
+      "type":"FeatureCollection",
+      "features":[
+        {"type":"Feature","properties":{"id":1,"name":"Block A"},"geometry":{"type":"Polygon","coordinates":[[[106.8,-6.2],[106.81,-6.2],[106.81,-6.21],[106.8,-6.21],[106.8,-6.2]]]}},
+        {"type":"Feature","properties":{"id":2,"name":"Block B"},"geometry":{"type":"Polygon","coordinates":[[[106.815,-6.205],[106.825,-6.205],[106.825,-6.215],[106.815,-6.215],[106.815,-6.205]]]}}
+      ]
+    };
+    loadGeoJSON(sample);
+
+    // Help dialog
+    document.getElementById('btn-help').onclick = ()=>{
+      alert(
+`How to use:
+
+1) Click 'Load GeoJSON' and choose your polygon layer (EPSG:4326).
+2) Click polygons to select (orange).
+3) Use the rectangle tool (left map toolbar) to box-select quickly.
+4) Switch basemaps (Streets / Satellite / Gray) from the top-right control.
+5) Click 'Merge Selected' to union polygons (Turf.js).
+6) Export selections/merged as GeoJSON from the top bar.`
+      );
+    };
+  </script>
+</body>
+</html>
