@@ -1,233 +1,329 @@
-// server.js
-// ──────────────────────────────────────────────────────────────────────────────
-// WebGIS API (Express + PostGIS)
-// Purpose: Serve live GeoJSON from PostGIS for your Leaflet/WebGIS frontend.
-// Key endpoints:
-//   GET /                       → quick info page
-//   GET /health                 → DB health check
-//   GET /whoami                 → DB user + client/server IPs (debugging)
-//   GET /blocks                 → GeoJSON from public.blocks (filters + no-cache)
-//   GET /buildings              → GeoJSON from public.buildings (filters + no-cache)
-//   GET /debug/buildings-stats  → quick stats for buildings (count/SRID/extent)
-// ──────────────────────────────────────────────────────────────────────────────
+/* ============================================================================
+   script.js — WebGIS front-end (Leaflet)
+   Purpose:
+     - Render polygons from your GeoJSON API (public.buildings via /buildings)
+     - Support local file import, multi-select, rectangle-select
+     - Show attribute table and export selected to GeoJSON/CSV
+     - Provide explicit "Reload" + optional auto-refresh
+   ============================================================================ */
 
-import express from "express";
-import cors from "cors";
-import pkg from "pg";
-import dotenv from "dotenv";
+/* =========================
+   0) CONFIG: API endpoint
+   - Use your public HTTPS API (Render/Railway/Cloudflared).
+   - Example (Render):  https://your-api.onrender.com
+   - Example (tunnel):  https://abc123.trycloudflare.com
+   - Local-only dev:    http://127.0.0.1:3000   (won’t work from Netlify)
+   ========================= */
+const API_BASE = "https://REPLACE_WITH_YOUR_PUBLIC_API"; // <— change this!
 
-dotenv.config();
+/* ============================================================================
+   1) MAP & BASEMAP
+   ============================================================================ */
+let map = L.map('map').setView([0, 0], 2);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '© OpenStreetMap contributors'
+}).addTo(map);
 
-const { Pool } = pkg;
-const app = express();
+/* ============================================================================
+   2) GLOBALS & STYLES
+   ============================================================================ */
+let geojsonLayer = L.geoJSON(null, {
+  style: defaultStyle,
+  onEachFeature: onEachFeature,
+  pointToLayer: makePoint
+}).addTo(map);
 
-/* ───────────── CORS ───────────── */
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
-  .split(",")
-  .map(s => s.trim())
-  .filter(Boolean);
+let selected = new Map();      // layerId -> { feature, layer }
+let allPropertyKeys = [];      // union of property keys for attribute table
+let buildingsLayerRef = null;  // keep reference to easily replace on reload
 
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      if (!origin) return cb(null, true);                 // allow curl/Postman
-      if (allowedOrigins.includes(origin)) return cb(null, true);
-      return cb(new Error("CORS not allowed for origin: " + origin));
-    },
-  })
-);
+function defaultStyle(_) { return { color: '#3388ff', weight: 2, fillOpacity: 0.2 }; }
+function selectedStyle(_) { return { color: '#ff7800', weight: 3, fillOpacity: 0.35 }; }
+function makePoint(feature, latlng) {
+  return L.circleMarker(latlng, { radius: 6, color: '#3388ff', fillOpacity: 0.9 });
+}
 
-/* ──────── Postgres connection pool ──────── */
-const dbCfg = {
-  host: process.env.PGHOST || "127.0.0.1",
-  port: Number(process.env.PGPORT || 5432),
-  database: process.env.PGDATABASE,
-  user: process.env.PGUSER,
-  password: process.env.PGPASSWORD,
-  // ssl: { rejectUnauthorized: false }, // ← enable if your provider requires SSL
-};
+/* ============================================================================
+   3) FEATURE INTERACTION (click → select/deselect, popup)
+   ============================================================================ */
+function onEachFeature(feature, layer) {
+  if (feature.properties) {
+    const lines = Object.entries(feature.properties)
+      .slice(0, 10)
+      .map(([k, v]) => `<b>${k}</b>: ${v}`);
+    layer.bindPopup(`<div style="max-width:240px">${lines.join('<br/>')}</div>`);
+  }
+  layer.on('click', () => toggleSelect(layer));
+}
 
-console.log("DB config:", {
-  host: dbCfg.host,
-  port: dbCfg.port,
-  database: dbCfg.database,
-  user: dbCfg.user,
+function toggleSelect(layer) {
+  const lid = layer._leaflet_id;
+  if (selected.has(lid)) {
+    selected.delete(lid);
+    geojsonLayer.resetStyle(layer);
+  } else {
+    selected.set(lid, { feature: layer.feature, layer: layer });
+    try { layer.setStyle(selectedStyle(layer.feature)); } catch {}
+  }
+  updateAttributeTable();
+}
+
+/* ============================================================================
+   4) LOADING & DRAWING GEOJSON (from API or file)
+   ============================================================================ */
+function loadGeoJSON(obj) {
+  // clear live layer & selection
+  geojsonLayer.clearLayers();
+  selected.clear();
+  allPropertyKeys = [];
+
+  // add features
+  geojsonLayer.addData(obj);
+
+  // compute union of keys for table header
+  if (obj.features && obj.features.length) {
+    obj.features.forEach(f => {
+      if (f.properties) {
+        Object.keys(f.properties).forEach(k => {
+          if (!allPropertyKeys.includes(k)) allPropertyKeys.push(k);
+        });
+      }
+    });
+  }
+
+  // zoom to data if present
+  try { map.fitBounds(geojsonLayer.getBounds(), { maxZoom: 16 }); } catch {}
+  updateAttributeTable();
+}
+
+/* ============================================================================
+   5) FETCH FROM API (public.buildings)
+   - No cache to ensure we see latest QGIS edits
+   - ?limit=10000 to avoid truncation for larger sets
+   - Optional q= and bbox= (wire UI later if needed)
+   ============================================================================ */
+async function fetchBuildings(params = {}) {
+  const q = params.q ? `&q=${encodeURIComponent(params.q)}` : '';
+  const bbox = params.bbox ? `&bbox=${params.bbox}` : '';
+  const url = `${API_BASE}/buildings?limit=10000${q}${bbox}&_=${Date.now()}`; // cache-buster
+  const resp = await fetch(url, { cache: 'no-store' });
+  if (!resp.ok) throw new Error(`API ${resp.status}: ${await resp.text()}`);
+  const data = await resp.json();
+  return data;
+}
+
+async function loadBuildingsFromAPI(params = {}) {
+  setLoading(true, "Loading buildings…");
+  try {
+    const gj = await fetchBuildings(params);
+    // replace current layer display
+    loadGeoJSON(gj);
+  } catch (err) {
+    console.error(err);
+    alert("Failed to load buildings from API.\n" + err.message);
+  } finally {
+    setLoading(false);
+  }
+}
+
+/* ============================================================================
+   6) FILE INPUT (local GeoJSON import)
+   ============================================================================ */
+document.getElementById('file-input')?.addEventListener('change', function (e) {
+  const f = e.target.files?.[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = function (ev) {
+    try {
+      const obj = JSON.parse(ev.target.result);
+      loadGeoJSON(obj);
+    } catch (err) {
+      alert('Invalid GeoJSON file.');
+      console.error(err);
+    }
+  };
+  reader.readAsText(f);
+  e.target.value = null;
 });
 
-const pool = new Pool(dbCfg);
+/* ============================================================================
+   7) SELECTION CONTROLS (select all / deselect all / clear)
+   ============================================================================ */
+document.getElementById('select-all')?.addEventListener('click', function () {
+  geojsonLayer.eachLayer(layer => {
+    const lid = layer._leaflet_id;
+    if (!selected.has(lid)) {
+      selected.set(lid, { feature: layer.feature, layer: layer });
+      try { layer.setStyle(selectedStyle(layer.feature)); } catch {}
+    }
+  });
+  updateAttributeTable();
+});
 
-// Test DB connection at startup
-pool
-  .connect()
-  .then((client) => {
-    console.log("✅ Connected to PostgreSQL successfully");
-    client.release();
-  })
-  .catch((err) => {
-    console.error("❌ Failed to connect to PostgreSQL at startup:", err.message);
+document.getElementById('deselect-all')?.addEventListener('click', function () {
+  selected.forEach(val => { try { geojsonLayer.resetStyle(val.layer); } catch {} });
+  selected.clear();
+  updateAttributeTable();
+});
+
+document.getElementById('clear-selection')?.addEventListener('click', function () {
+  selected.forEach(val => { try { geojsonLayer.resetStyle(val.layer); } catch {} });
+  selected.clear();
+  updateAttributeTable();
+});
+
+/* ============================================================================
+   8) EXPORT (selected → GeoJSON / CSV)
+   ============================================================================ */
+document.getElementById('export-geojson')?.addEventListener('click', function () {
+  if (selected.size === 0) { alert('No features selected'); return; }
+  const fc = { type: 'FeatureCollection', features: Array.from(selected.values()).map(v => v.feature) };
+  const blob = new Blob([JSON.stringify(fc, null, 2)], { type: 'application/json;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = 'selected_features.geojson'; a.click();
+  URL.revokeObjectURL(url);
+});
+
+document.getElementById('export-csv')?.addEventListener('click', function () {
+  if (selected.size === 0) { alert('No features selected'); return; }
+  const keys = allPropertyKeys;
+  const rows = [];
+  rows.push(keys.join(','));
+  for (let { feature } of selected.values()) {
+    const props = feature.properties || {};
+    const row = keys.map(k => {
+      const v = props[k] !== undefined ? String(props[k]) : '';
+      return `"${v.replace(/"/g, '""')}"`; // CSV-escape
+    }).join(',');
+    rows.push(row);
+  }
+  const blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = 'selected_features.csv'; a.click();
+  URL.revokeObjectURL(url);
+});
+
+/* ============================================================================
+   9) ATTRIBUTE TABLE RENDERING + SEARCH
+   ============================================================================ */
+function updateAttributeTable() {
+  const head = document.getElementById('table-head');
+  const body = document.getElementById('table-body');
+  if (!head || !body) return;
+
+  head.innerHTML = '';
+  body.innerHTML = '';
+
+  const keys = allPropertyKeys.slice();
+  if (keys.length === 0 && selected.size > 0) {
+    selected.forEach(({ feature }) => {
+      Object.keys(feature.properties || {}).forEach(k => { if (!keys.includes(k)) keys.push(k); });
+    });
+  }
+
+  // header
+  let hrow = '<tr><th>#</th>';
+  keys.forEach(k => { hrow += `<th>${k}</th>`; });
+  hrow += '</tr>';
+  head.innerHTML = hrow;
+
+  // body
+  let i = 1;
+  for (let { feature } of selected.values()) {
+    const props = feature.properties || {};
+    let row = `<tr><td>${i}</td>`;
+    keys.forEach(k => { row += `<td>${escapeHtml(props[k] !== undefined ? String(props[k]) : '')}</td>`; });
+    row += '</tr>';
+    body.insertAdjacentHTML('beforeend', row);
+    i++;
+  }
+}
+
+document.getElementById('table-search')?.addEventListener('input', function (e) {
+  const q = e.target.value.trim().toLowerCase();
+  const tbody = document.getElementById('table-body');
+  if (!tbody) return;
+  Array.from(tbody.rows).forEach(r => {
+    const txt = r.textContent.toLowerCase();
+    r.style.display = txt.indexOf(q) >= 0 ? '' : 'none';
+  });
+});
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+/* ============================================================================
+   10) RECTANGLE SELECT (Leaflet.draw)
+   ============================================================================ */
+const drawnItems = new L.FeatureGroup().addTo(map);
+const drawControl = new L.Control.Draw({
+  draw: { polyline: false, polygon: false, marker: false, circle: false, circlemarker: false, rectangle: { shapeOptions: { color: '#f06' } } },
+  edit: { featureGroup: drawnItems, edit: false, remove: false }
+});
+map.addControl(drawControl);
+
+map.on(L.Draw.Event.CREATED, function (e) {
+  const layer = e.layer;
+  drawnItems.addLayer(layer);
+  const rectBounds = layer.getBounds();
+
+  geojsonLayer.eachLayer(gLayer => {
+    if (gLayer.getLatLng) {
+      if (rectBounds.contains(gLayer.getLatLng())) selectLayer(gLayer);
+    } else if (gLayer.getBounds) {
+      if (rectBounds.intersects(gLayer.getBounds())) selectLayer(gLayer);
+    }
   });
 
-/* ───────────── Routes ───────────── */
-
-// 1) Home
-app.get("/", (_req, res) => {
-  res
-    .type("text")
-    .send("WebGIS API is running.\nTry /health, /whoami, /blocks, /buildings\n");
+  // remove rectangle after selection (UX preference)
+  setTimeout(() => drawnItems.removeLayer(layer), 300);
+  updateAttributeTable();
 });
 
-// 2) Health
-app.get("/health", async (_req, res) => {
-  try {
-    await pool.query("SELECT 1");
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+function selectLayer(gLayer) {
+  const lid = gLayer._leaflet_id;
+  if (!selected.has(lid)) {
+    selected.set(lid, { feature: gLayer.feature, layer: gLayer });
+    try { gLayer.setStyle(selectedStyle(gLayer.feature)); } catch {}
   }
-});
+}
 
-// 3) Who am I
-app.get("/whoami", async (_req, res) => {
-  try {
-    const { rows } = await pool.query(`
-      SELECT
-        current_user,
-        inet_client_addr()  AS client_ip,
-        inet_server_addr()  AS server_ip,
-        inet_server_port()  AS server_port
-    `);
-    res.json(rows?.[0] || {});
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+/* ============================================================================
+   11) LOADING INDICATOR + RELOAD/REFRESH
+   ============================================================================ */
+function setLoading(on, msg = 'Loading…') {
+  let el = document.getElementById('loading');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'loading';
+    el.style.cssText = 'position:absolute;top:10px;right:10px;z-index:9999;background:#0008;color:#fff;padding:8px 12px;border-radius:8px;font:14px/1.3 system-ui;';
+    document.body.appendChild(el);
   }
-});
+  el.style.display = on ? 'block' : 'none';
+  el.textContent = on ? msg : '';
+}
 
-// 4) /blocks → public.blocks (geom), with ?limit & ?bbox & ?q
-app.get("/blocks", async (req, res) => {
-  try {
-    const limit = Math.min(Number(req.query.limit) || 1000, 10000);
-    const q = req.query.q ? String(req.query.q).trim() : null;
-    const bbox = req.query.bbox ? req.query.bbox.split(",").map(Number) : null;
+// Add a basic reload button if your HTML has <button id="reload-api">Reload</button>
+document.getElementById('reload-api')?.addEventListener('click', () => loadBuildingsFromAPI());
 
-    const where = [];
-    const params = [];
-    let i = 0;
+// OPTIONAL: auto-refresh every 20s (comment out if not desired)
+// setInterval(loadBuildingsFromAPI, 20000);
 
-    if (q) {
-      where.push(`name ILIKE '%' || $${++i} || '%'`);
-      params.push(q);
-    }
-    if (bbox && bbox.length === 4 && bbox.every(Number.isFinite)) {
-      where.push(
-        `ST_Intersects(geom, ST_MakeEnvelope($${++i}, $${++i}, $${++i}, $${++i}, 4326))`
-      );
-      params.push(bbox[0], bbox[1], bbox[2], bbox[3]);
-    }
-
-    const whereSQL = where.length ? `WHERE ${where.join(" AND ")}` : "";
-
-    const sql = `
-      SELECT jsonb_build_object(
-        'type','FeatureCollection',
-        'features', COALESCE(jsonb_agg(
-          jsonb_build_object(
-            'type','Feature',
-            'geometry', ST_AsGeoJSON(geom)::jsonb,
-            'properties', to_jsonb(row) - 'geom'
-          )
-        ), '[]'::jsonb)
-      ) AS geojson
-      FROM (
-        SELECT * FROM public.blocks
-        ${whereSQL}
-        LIMIT ${limit}
-      ) row;
-    `;
-
-    const { rows } = await pool.query(sql, params);
-    res.set("Cache-Control", "no-store");
-    res.json(rows?.[0]?.geojson ?? { type: "FeatureCollection", features: [] });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+/* ============================================================================
+   12) INITIAL LOAD
+   - Try API first. If API_BASE is left as placeholder or fetch fails,
+     fall back to local sample.geojson if present.
+   ============================================================================ */
+(async function bootstrap() {
+  if (!API_BASE || API_BASE.includes('REPLACE_WITH_YOUR_PUBLIC_API')) {
+    // fallback to sample file for first load
+    try {
+      const r = await fetch('sample.geojson', { cache: 'no-store' });
+      if (r.ok) loadGeoJSON(await r.json());
+    } catch {}
+    console.warn('⚠️ Set API_BASE to your public API to load DB data.');
+  } else {
+    await loadBuildingsFromAPI(); // live data
   }
-});
-
-// 5) /buildings → public.buildings (geom), same filters
-app.get("/buildings", async (req, res) => {
-  try {
-    const limit = Math.min(Number(req.query.limit) || 1000, 10000);
-    const q = req.query.q ? String(req.query.q).trim() : null;
-    const bbox = req.query.bbox ? req.query.bbox.split(",").map(Number) : null;
-
-    const where = [];
-    const params = [];
-    let i = 0;
-
-    // adjust "name" if your label field differs
-    if (q) { where.push(`name ILIKE '%' || $${++i} || '%'`); params.push(q); }
-
-    if (bbox && bbox.length === 4 && bbox.every(Number.isFinite)) {
-      where.push(
-        `ST_Intersects(geom, ST_MakeEnvelope($${++i}, $${++i}, $${++i}, $${++i}, 4326))`
-      );
-      params.push(bbox[0], bbox[1], bbox[2], bbox[3]);
-    }
-
-    const whereSQL = where.length ? `WHERE ${where.join(" AND ")}` : "";
-
-    const sql = `
-      SELECT jsonb_build_object(
-        'type','FeatureCollection',
-        'features', COALESCE(jsonb_agg(
-          jsonb_build_object(
-            'type','Feature',
-            'geometry', ST_AsGeoJSON(geom)::jsonb,
-            'properties', to_jsonb(row) - 'geom'
-          )
-        ), '[]'::jsonb)
-      ) AS geojson
-      FROM (
-        SELECT * FROM public.buildings
-        ${whereSQL}
-        LIMIT ${limit}
-      ) row;
-    `;
-
-    const { rows } = await pool.query(sql, params);
-    res.set("Cache-Control", "no-store");
-    res.json(rows?.[0]?.geojson ?? { type: "FeatureCollection", features: [] });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// 6) Debug stats for buildings
-app.get("/debug/buildings-stats", async (_req, res) => {
-  try {
-    const { rows: cnt } = await pool.query(
-      `SELECT COUNT(*)::int AS count FROM public.buildings`
-    );
-    const { rows: sr } = await pool.query(
-      `SELECT COALESCE(ST_SRID(geom),0) AS srid
-       FROM public.buildings
-       WHERE geom IS NOT NULL
-       LIMIT 1`
-    );
-    const { rows: bbox } = await pool.query(
-      `SELECT ST_Extent(geom) AS extent FROM public.buildings`
-    );
-    res.json({
-      count: cnt[0].count,
-      srid: sr[0]?.srid ?? 0,
-      extent: bbox[0].extent,
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-/* ───────────── Start server ───────────── */
-const port = Number(process.env.PORT || 3000);
-app.listen(port, () => {
-  console.log(`✅ API running on http://localhost:${port}`);
-});
+})();
