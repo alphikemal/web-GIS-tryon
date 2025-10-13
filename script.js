@@ -14,7 +14,7 @@
    - Example (tunnel):  https://abc123.trycloudflare.com
    - Local-only dev:    http://127.0.0.1:3000   (won’t work from Netlify)
    ========================= */
-const API_BASE = "https://REPLACE_WITH_YOUR_PUBLIC_API"; // <— change this!
+const API_BASE = "https://dulcet-lolly-53b12c.netlify.app/"; // <— change this!
 
 /* ============================================================================
    1) MAP & BASEMAP
@@ -327,3 +327,4 @@ document.getElementById('reload-api')?.addEventListener('click', () => loadBuild
     await loadBuildingsFromAPI(); // live data
   }
 })();
+
