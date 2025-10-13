@@ -14,7 +14,22 @@
    - Example (tunnel):  https://abc123.trycloudflare.com
    - Local-only dev:    http://127.0.0.1:3000   (won’t work from Netlify)
    ========================= */
-const API_BASE = "https://dulcet-lolly-53b12c.netlify.app/"; // <— change this!
+// put your real deployed API URL here (must be HTTPS for Netlify)
+const API_BASE = "https://dulcet-lolly-53b12c.netlify.app/";
+
+// load buildings from API with no-cache so QGIS edits show up
+fetch(`${API_BASE}/buildings?limit=10000&_=${Date.now()}`, { cache: 'no-store' })
+  .then(r => r.json())
+  .then(geojson => {
+    if (window.bldgLayer) map.removeLayer(window.bldgLayer);
+    window.bldgLayer = L.geoJSON(geojson, {
+      style: { weight: 2, fillOpacity: 0.25 },
+      onEachFeature: (f, l) => l.bindPopup(`<b>${f.properties.name ?? f.properties.id ?? 'Building'}</b>`)
+    }).addTo(map);
+    try { map.fitBounds(window.bldgLayer.getBounds(), { maxZoom: 16 }); } catch {}
+  })
+  .catch(err => console.error("API error:", err));
+
 
 /* ============================================================================
    1) MAP & BASEMAP
@@ -327,4 +342,5 @@ document.getElementById('reload-api')?.addEventListener('click', () => loadBuild
     await loadBuildingsFromAPI(); // live data
   }
 })();
+
 
