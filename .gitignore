@@ -1,6 +1,6 @@
 PGHOST=ep-young-morning-a1h7fia0-pooler.ap-southeast-1.aws.neon.tech
 PGPORT=5432
-PGDATABASE=neondb
+PGDATABASE=webgis_db
 PGUSER=neondb_owner
 PGPASSWORD=npg_fA3xjDMc7Rba
 
