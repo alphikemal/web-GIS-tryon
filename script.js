@@ -15,7 +15,7 @@
    - Local-only dev:    http://127.0.0.1:3000   (won’t work from Netlify)
    ========================= */
 // put your real deployed API URL here (must be HTTPS for Netlify)
-const API_BASE = "https://dulcet-lolly-53b12c.netlify.app/";
+const API_BASE = "https://webgis-api.up.railway.app";
 
 // load buildings from API with no-cache so QGIS edits show up
 fetch(`${API_BASE}/buildings?limit=10000&_=${Date.now()}`, { cache: 'no-store' })
@@ -342,5 +342,6 @@ document.getElementById('reload-api')?.addEventListener('click', () => loadBuild
     await loadBuildingsFromAPI(); // live data
   }
 })();
+
 
 
